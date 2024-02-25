@@ -461,6 +461,7 @@ struct Header GETHeadears(string request)
 	return reqHeader;
 }
 
+
 string CombineFileName(Header reqHeader)
 {
 	string file_name = reqHeader.fileName;
@@ -468,6 +469,7 @@ string CombineFileName(Header reqHeader)
 	string combined_string = file_name.substr(0, file_name.find_last_of(".")) + "-" + lang + file_name.substr(file_name.find_last_of("."));
 	return combined_string;
 }
+
 
 string Create_response(string type, string body_content)
 {
@@ -489,6 +491,7 @@ string Create_response(string type, string body_content)
 	return response;
 }
 
+
 string generate_http_404_response()
 {
 	string eror_body_msg = "404 - File Not Found";
@@ -505,6 +508,7 @@ string generate_http_404_response()
 
 	return response;
 }
+
 
 string GetTime()
 {
