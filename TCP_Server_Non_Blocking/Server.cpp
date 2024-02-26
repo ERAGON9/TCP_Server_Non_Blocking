@@ -11,19 +11,24 @@ using namespace std;
 
 struct SocketState
 {
-	SOCKET id;			// Socket handle
-	int	recv;			// Receiving?
-	int	send;			// Sending?
-	int sendSubType;	// Sending sub-type
-	char buffer[1024];
+	SOCKET id;			    // Socket handle
+	int	recv;			    // Receiving?
+	int	send;			    // Sending?
+	int sendSubType;	    // Sending sub-type
+	char buffer[2048];
 	int len;
+	int time_last_request;   // time from epoch at secounds.
 };
 
 struct Header
 {
-	string fileName;	// 
-	string lang;		// Language (he/en/fr)
-	string type;        // Type (txt/html)
+	string fileName;	        // File name (file/website/test...)
+	string lang;		        // Language (he/en/fr)
+	string file_type;           // File type (txt/html)
+	int requet_type;            // requet type (Get_Request=1/.../Trace_Request=7)
+	int body_content_length;    // The body content message length
+	string body_content;        // The body content
+	string finish_code;         // the code returned ("200 OK"/"201 Created" /"404 Not Found"/...)
 };
 
 const int TIME_PORT = 8080;
@@ -49,19 +54,20 @@ void removeSocket(SocketState* sockets, int* socketsCount, int index);
 void acceptConnection(SocketState* sockets, int* socketsCount, int index);
 void receiveMessage(SocketState* sockets, int* socketsCount, int index);
 void sendMessage(SocketState* sockets, int* socketsCount, int index);
-struct Header GETHeadears(string request);
-string CombineFileName(Header reqHeader);
-string Create_response(string type, string body_content);
-string generate_http_404_response();
+struct Header FillHeadears(string request);
+string CombineFilePath_QS(Header reqHeader);
+string CombineFilePath(Header reqHeader);
+string Create_response(Header reqHeader);
 string GetTime();
+void Delete_LastRequest_FromBuffer(SocketState* sockets, int index);
 
 
 void main()
 {
 	// The sockets array, that include all the server sockets.
 	// The socketsCount, the actual number of socket at the sockets array.
-	struct SocketState sockets[MAX_SOCKETS] = { 0 }; // Make not global!!!
-	int socketsCount = 0; // Make not global!!!
+	struct SocketState sockets[MAX_SOCKETS] = { 0 };
+	int socketsCount = 0;
 
 
 	// Initialize Winsock (Windows Sockets).
@@ -151,6 +157,8 @@ void main()
 	// Special socket, the listen socket.
 	addSocket(sockets, &socketsCount, listenSocket, LISTEN);
 
+	time_t timer;
+
 	// Accept connections and handles them one by one.
 	while (true)
 	{
@@ -165,7 +173,14 @@ void main()
 		for (int i = 0; i < MAX_SOCKETS; i++)
 		{
 			if ((sockets[i].recv == LISTEN) || (sockets[i].recv == RECEIVE))
-				FD_SET(sockets[i].id, &waitRecv);
+			{
+				time(&timer);
+				if ((sockets[i].time_last_request != 0) && (timer - sockets[i].time_last_request > 120)) // Past more than 2 min from last recv.
+					removeSocket(sockets, &socketsCount, i);
+				else
+					FD_SET(sockets[i].id, &waitRecv);
+			}
+
 		}
 
 		fd_set waitSend;
@@ -201,7 +216,11 @@ void main()
 					break;
 
 				case RECEIVE:
-					receiveMessage(sockets, &socketsCount, i);
+					time(&timer);
+					if ((sockets[i].time_last_request != 0) && (timer - sockets[i].time_last_request > 120)) // Past more than 2 min from last recv.
+						removeSocket(sockets, &socketsCount, i);
+					else
+						receiveMessage(sockets, &socketsCount, i);
 					break;
 				}
 			}
@@ -215,7 +234,10 @@ void main()
 				switch (sockets[i].send)
 				{
 				case SEND:
-					sendMessage(sockets, &socketsCount, i);
+					if ((sockets[i].time_last_request != 0) && (timer - sockets[i].time_last_request > 120)) // Past more than 2 min from last recv.
+						removeSocket(sockets, &socketsCount, i);
+					else
+						sendMessage(sockets, &socketsCount, i);
 					break;
 				}
 			}
@@ -246,6 +268,7 @@ bool addSocket(SocketState* sockets, int* socketsCount, SOCKET id, int what)
 			sockets[i].recv = what;
 			sockets[i].send = IDLE;
 			sockets[i].len = 0;
+			sockets[i].time_last_request = 0;
 			(*socketsCount)++;
 			return (true);
 		}
@@ -258,6 +281,7 @@ void removeSocket(SocketState* sockets, int* socketsCount, int index)
 {
 	sockets[index].recv = EMPTY;
 	sockets[index].send = EMPTY;
+	sockets[index].time_last_request = 0;
 	(*socketsCount)--;
 }
 
@@ -309,72 +333,46 @@ void receiveMessage(SocketState* sockets, int* socketsCount, int index)
 	}
 	else
 	{
-		sockets[index].buffer[len + bytesRecv] = '\0'; // Add the null-terminating to make it a string
+		time_t timer;
+		time(&timer);
+
+		sockets[index].buffer[len + bytesRecv] = '\0'; // Add the null-terminating to make it a string.
+		sockets[index].time_last_request = (int)timer;
 		cout << "Web Server: Recieved: " << bytesRecv << " bytes of \"" << &sockets[index].buffer[len] << "\" message.\n\n";
 
 		sockets[index].len += bytesRecv; // Add to len the size of the new request.
 
-		if ((sockets[index].len > 0) && (sockets[index].send == IDLE)) // Need to add ( && sockets[index].send == IDLE) to not override a request before it done.
+		if (sockets[index].len > 0)
 		{
 			if (strncmp(sockets[index].buffer, "GET", 3) == 0) // Client request-> GET
 			{
-				sockets[index].send = SEND;
 				sockets[index].sendSubType = Get_Request;
-				//memcpy(sockets[index].buffer, &sockets[index].buffer[3], sockets[index].len - 3);
-				//sockets[index].len -= 3;
-				return;
 			}
 			else if (strncmp(sockets[index].buffer, "POST", 4) == 0) // Client request-> POST
 			{
-				sockets[index].send = SEND;
 				sockets[index].sendSubType = Post_Request;
-				return;
 			}
 			else if (strncmp(sockets[index].buffer, "PUT", 3) == 0) // Client request-> PUT 
 			{
-				sockets[index].send = SEND;
 				sockets[index].sendSubType = Put_Request;
-				return;
 			}
-			else if (strncmp(sockets[index].buffer, "Delete", 6) == 0) // Client request-> Delete 
+			else if (strncmp(sockets[index].buffer, "DELETE", 6) == 0) // Client request-> Delete 
 			{
-				sockets[index].send = SEND;
 				sockets[index].sendSubType = Delete_Request;
-				return;
 			}
 			else if (strncmp(sockets[index].buffer, "HEAD", 4) == 0) // Client request-> HEAD  
 			{
-				sockets[index].send = SEND;
 				sockets[index].sendSubType = Head_Request;
-				return;
 			}
 			else if (strncmp(sockets[index].buffer, "OPTIONS", 7) == 0) // Client request-> OPTIONS 
 			{
-				sockets[index].send = SEND;
 				sockets[index].sendSubType = Options_Request;
-				return;
 			}
 			else if (strncmp(sockets[index].buffer, "TRACE", 5) == 0) // Client request-> TRACE 
 			{
-				sockets[index].send = SEND;
 				sockets[index].sendSubType = Trace_Request;
-				return;
 			}
-			else
-			{
-				cout << "Web Server: We do not support this tupe of request, try other type";
-				if (len > 0)
-				{
-					memcpy(sockets[index].buffer, &sockets[index].buffer[len], sockets[index].len - len);
-					sockets[index].len -= len;
-				}
-				else // len == 0
-				{
-					memcpy(sockets[index].buffer, &sockets[index].buffer[bytesRecv], sockets[index].len - bytesRecv);
-					sockets[index].len -= bytesRecv;
-				}
-				return;
-			}
+			sockets[index].send = SEND; // For all request types, after inserting the sendSubType, need to set to SEND.
 		}
 	}
 }
@@ -383,132 +381,232 @@ void receiveMessage(SocketState* sockets, int* socketsCount, int index)
 void sendMessage(SocketState* sockets, int* socketsCount, int index)
 {
 	int bytesSent = 0;
-	char sendBuff[1024];
+	char sendBuff[2048];
 
 	SOCKET msgSocket = sockets[index].id;
 	string request = string(sockets[index].buffer);
+	string response;
+	struct Header requestHeader = FillHeadears(request);
 
-	if (sockets[index].sendSubType == Get_Request) // Client request-> GET 
+	if (sockets[index].sendSubType == Get_Request || sockets[index].sendSubType == Head_Request) // Client request-> GET/HEAD
 	{
-		struct Header requestHeader = GETHeadears(request);
-		string updated_File_Name = CombineFileName(requestHeader);
-		string file_Name = "C:\\temp\\" + updated_File_Name;
-		string file_contents, response;
-		ifstream file(file_Name);
+		requestHeader.requet_type = Get_Request;
+		string file_path = CombineFilePath_QS(requestHeader);
+		string file_contents;
+		ifstream file(file_path);
 
-		cout << file_Name << endl;
-
-		if (file.good()) 
+		if (file.good()) // File exists.
 		{
-			cout << "File exists at: " << file_Name << endl;
+			cout << "File exists at: " << file_path << endl;
 			stringstream buffer;
 			buffer << file.rdbuf();
 			file_contents = buffer.str();
-			response = Create_response(requestHeader.type, file_contents);
+			requestHeader.finish_code = "200 OK";
+			requestHeader.body_content = file_contents;
 		}
-		else 
+		else // File not exists.
 		{
-			cout << "File does not exist at: " << file_Name << endl;
-			response = generate_http_404_response();
+			cout << "File does not exist at: " << file_path << endl;
+			requestHeader.finish_code = "404 Not Found";
+			requestHeader.body_content = "404 - File Not Found";
+		}
+		file.close();
+		if (sockets[index].sendSubType == Head_Request)
+		{
+			requestHeader.body_content = "";
+			requestHeader.requet_type = Head_Request;
 		}
 
-		file.close();
+		response = Create_response(requestHeader);
 		strcpy(sendBuff, response.c_str());
-
-
 	}
 	else if (sockets[index].sendSubType == Post_Request)  // Client request-> POST 
 	{
-		// Answer client's request by the current time in seconds.
-		time_t timer;
-		time(&timer);
-		
-		_itoa((int)timer, sendBuff, 10); // Convert the number to string.
+		requestHeader.requet_type = Post_Request;
+		cout << requestHeader.body_content << endl << endl;
+		requestHeader.finish_code = "200 OK";
+
+		response = Create_response(requestHeader);
+		strcpy(sendBuff, response.c_str());
+	}
+	else if (sockets[index].sendSubType == Put_Request)  // Client request-> PUT 
+	{
+		requestHeader.requet_type = Put_Request;
+		string file_path = CombineFilePath(requestHeader);
+		ifstream fileR(file_path);
+
+		if (fileR.good()) // File exists.
+			requestHeader.finish_code = "200 OK";
+		else // File not exists.
+			requestHeader.finish_code = "201 Created";
+		fileR.close();
+
+		ofstream fileW;
+		fileW.open(file_path); // Open file in text mode for writing. if the file not exists it's create one.
+		if (!fileW.is_open())
+		{
+			requestHeader.finish_code = "500 Internal Server Error";
+			requestHeader.body_content = "500 Internal Server Error";
+		}
+		else
+		{
+			fileW << requestHeader.body_content;
+			fileW.close();
+		}
+
+		response = Create_response(requestHeader);
+		strcpy(sendBuff, response.c_str());
+	}
+	else if (sockets[index].sendSubType == Delete_Request)  // Client request-> DELETE 
+	{
+		requestHeader.requet_type = Delete_Request;
+		string file_path = CombineFilePath(requestHeader);
+
+		ifstream fileR(file_path);
+		if (fileR.good()) // File exists.
+		{
+			fileR.close();
+			if (remove(file_path.c_str()) == 0)
+				requestHeader.finish_code = "200 OK";
+			else 
+				requestHeader.finish_code = "500 Internal Server Error";
+		}
+		else 
+			requestHeader.finish_code = "404 Not Found";
+
+		response = Create_response(requestHeader);
+		strcpy(sendBuff, response.c_str());
+	}
+	else if (sockets[index].sendSubType == Options_Request)  // Client request-> OPTIONS 
+	{
+		requestHeader.requet_type = Options_Request;
+		requestHeader.finish_code = "200 OK";
+
+		response = Create_response(requestHeader);
+		strcpy(sendBuff, response.c_str());
+
+	}
+	else if (sockets[index].sendSubType == Trace_Request)  // Client request-> TRACE 
+	{
+		requestHeader.requet_type = Trace_Request;
+		requestHeader.finish_code = "200 OK";
+		requestHeader.body_content = request;
+
+		response = Create_response(requestHeader);
+		strcpy(sendBuff, response.c_str());
+	}
+	else // Not supported type.
+	{
+		cout << "Web Server: Error at sendSubType" << endl;
+		requestHeader.requet_type = -1;
+		requestHeader.finish_code = "405 Method Not Allowed";
+		requestHeader.body_content = "405 Method Not Allowed.";
+
+		response = Create_response(requestHeader);
+		strcpy(sendBuff, response.c_str());
 	}
 
 	bytesSent = send(msgSocket, sendBuff, (int)strlen(sendBuff), 0);
 	if (SOCKET_ERROR == bytesSent)
 	{
-		cout << "Time Server: Error at send(): " << WSAGetLastError() << endl;
+		cout << "Web Server: Error at send(): " << WSAGetLastError() << endl;
 		return;
 	}
 
-	cout << "Time Server: Sent: " << bytesSent << "\\" << strlen(sendBuff) << " bytes of \"" << sendBuff << "\" message.\n\n";
+	cout << "Web Server: Sent: " << bytesSent << "\\" << strlen(sendBuff) << " bytes of \"" << sendBuff << "\" message.\n\n";
 
-	sockets[index].buffer[0] = '\0';
-	sockets[index].len = 0;
+	Delete_LastRequest_FromBuffer(sockets, index);
 	sockets[index].send = IDLE;
 }
 
 
-
-struct Header GETHeadears(string request)
+struct Header FillHeadears(string request)
 {
 	struct Header reqHeader;
-	
-	size_t start_pos = request.find("/") + 1; 
-	size_t end_pos = request.find("?");
-	reqHeader.fileName = request.substr(start_pos, end_pos - start_pos); // Extract the substring between '/' and '?'
+	size_t start_pos, end_pos;
 
-	start_pos = request.find("lang=") + 5; // Find the position of "lang=" and move 5 positions ahead to skip "lang="
-	end_pos = request.find(" ", start_pos); 
-	reqHeader.lang = request.substr(start_pos, end_pos - start_pos); // Extract the substring between "lang=" and the space
-	
-	start_pos = request.find(".") + 1;
-	end_pos = request.find("?");
-	reqHeader.type = request.substr(start_pos, end_pos - start_pos); // Extract the substring between "." and '?'
+	start_pos = request.find("/") + 1;
+	end_pos = request.find(".");
+	reqHeader.fileName = request.substr(start_pos, end_pos - start_pos); // Extract the substring between '/' and '.' ("file")
 
+	start_pos = request.find("lang="); // Find the position of "lang=" and move 5 positions ahead to skip "lang="
+	if (start_pos == string::npos) // There is no "lang=" at the string request.
+	{
+		reqHeader.lang = "en"; // Default value.
+
+		start_pos = request.find(".") + 1;
+		end_pos = request.find(" ", start_pos);
+		reqHeader.file_type = request.substr(start_pos, end_pos - start_pos); // Extract the substring between "." and the space ("txt")
+	}
+	else
+	{
+		start_pos += 5;
+		end_pos = request.find(" ", start_pos);
+		reqHeader.lang = request.substr(start_pos, end_pos - start_pos); // Extract the substring between "lang=" and the space ("en")
+
+		start_pos = request.find(".") + 1;
+		end_pos = request.find("?");
+		reqHeader.file_type = request.substr(start_pos, end_pos - start_pos); // Extract the substring between "." and '?' ("txt")
+	}
+
+	start_pos = request.find("Content-Length:");
+	if (start_pos == string::npos) // There is no body content at the string request.
+	{
+		reqHeader.body_content_length = 0;
+		reqHeader.body_content = "";
+	}
+	else
+	{
+		start_pos += 16; // + Content-Length: + space.
+		end_pos = request.find("\r", start_pos);
+		string length = request.substr(start_pos, end_pos - start_pos); // Extract the substring between 'Content-Length: ' and '\n' (number)
+		reqHeader.body_content_length = stoi(length);
+
+		start_pos = request.find("\r\n\r\n") + 4;
+		reqHeader.body_content = request.substr(start_pos);
+	}
+	
 	return reqHeader;
 }
 
-
-string CombineFileName(Header reqHeader)
+string CombineFilePath_QS(Header reqHeader)
 {
 	string file_name = reqHeader.fileName;
 	string lang = reqHeader.lang;
-	string combined_string = file_name.substr(0, file_name.find_last_of(".")) + "-" + lang + file_name.substr(file_name.find_last_of("."));
+	string file_type = reqHeader.file_type;
+	string combined_string = "C:\\temp\\" + file_name + "-" + lang+ "." + file_type;
 	return combined_string;
 }
 
+string CombineFilePath(Header reqHeader)
+{
+	string file_name = reqHeader.fileName;
+	string file_type = reqHeader.file_type;
+	string combined_string = "C:\\temp\\" + file_name + "." + file_type;
+	return combined_string;
+}
 
-string Create_response(string type, string body_content)
+string Create_response(Header reqHeader)
 {
 	// Generate the HTTP response headers
-	string response = "HTTP/1.1 200 OK\r\n";
+	string response = "HTTP/1.1 "+ reqHeader.finish_code +"\r\n";
 	response += "Cache-Control: no-cache, private\r\n";
 	response += "Date: "+ GetTime() +" GMT\r\n";
 	response += "Server: LiorServer/1.0\r\n";
-	if (type == "txt")
-		response += "Content-Type: text/plain; charset=utf-8\r\n";
-	else
+	if (reqHeader.requet_type == Options_Request)
+		response += "Allow: OPTIONS, GET, HEAD, POST, PUT, DELETE, TRACE\r\n";
+	if(reqHeader.requet_type != Trace_Request)
 		response += "Content-Type: text/html; charset=utf-8\r\n";
-	response += "Content-Length: " + to_string(body_content.size()) + "\r\n";
+	else
+		response += "Content-Type: message/http; charset=utf-8\r\n";
+	response += "Content-Length: " + to_string(reqHeader.body_content.size()) + "\r\n";
 	response += "Content-Language: he, fr\r\n\r\n";
 
 	// Generate the response body
-	response += body_content;
+	response += reqHeader.body_content;
 
 	return response;
 }
-
-
-string generate_http_404_response()
-{
-	string eror_body_msg = "404 - File Not Found";
-	// Generate the HTTP 404 response headers
-	std::string response = "HTTP/1.1 404 Not Found\r\n";
-	response += "Date: "+ GetTime() +" GMT\r\n";
-	response += "Server: LiorServer/1.0\r\n";
-	response += "Content-Type: text/html; charset=utf-8\r\n";
-	response += "Content-Length: " + to_string(eror_body_msg.length()) + "\r\n";
-	response += "Content-Language: he, fr\r\n\r\n";
-
-	// Generate the response body
-	response += "404 - File Not Found\r\n";
-
-	return response;
-}
-
 
 string GetTime()
 {
@@ -520,10 +618,18 @@ string GetTime()
 	printable_Time = string(ctime(&timer)); // Parse the current time to printable string.
 
 	size_t pos = printable_Time.find('\n');
-	if (pos != std::string::npos) 
+	if (pos != string::npos)  // The sring printable_Time include '\n' so need to erase it.
 	{
 		printable_Time.erase(pos, 1);
 	}
 
 	return printable_Time;
 }
+
+void Delete_LastRequest_FromBuffer(SocketState* sockets, int index)
+{
+	int bufferLen = strlen(sockets[index].buffer);
+	memcpy(sockets[index].buffer, &sockets[index].buffer[bufferLen], bufferLen);
+	sockets[index].len -= bufferLen;
+}
+
